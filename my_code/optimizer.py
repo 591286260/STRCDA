@@ -1,4 +1,3 @@
-```python id="e9v7s2"
 import tensorflow.compat.v1 as tf
 from sklearn.neighbors import NearestNeighbors
 
