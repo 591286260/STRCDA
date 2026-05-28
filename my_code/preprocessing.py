@@ -1,84 +1,159 @@
+```python
 import numpy as np
 import scipy.sparse as sp
 
 
 def sparse_to_tuple(sparse_mx):
+    """
+    Convert a sparse matrix into tuple representation.
+
+    Parameters
+    ----------
+    sparse_mx : scipy.sparse matrix
+        Input sparse matrix.
+
+    Returns
+    -------
+    tuple
+        Coordinates, values, and shape of the sparse matrix.
+    """
     if not sp.isspmatrix_coo(sparse_mx):
         sparse_mx = sparse_mx.tocoo()
+
     coords = np.vstack((sparse_mx.row, sparse_mx.col)).transpose()
     values = sparse_mx.data
     shape = sparse_mx.shape
+
     return coords, values, shape
 
 
 def preprocess_graph(adj):
+    """
+    Normalize the adjacency matrix for graph convolution.
+
+    The function first adds self-loops and then applies symmetric
+    normalization: D^(-1/2) A D^(-1/2).
+    """
     adj = sp.coo_matrix(adj)
+
+    # Add self-loops
     adj_ = adj + sp.eye(adj.shape[0])
+
+    # Compute D^(-1/2)
     rowsum = np.array(adj_.sum(1))
-    degree_mat_inv_sqrt = sp.diags(np.power(rowsum, -0.5).flatten())
-    adj_normalized = adj_.dot(degree_mat_inv_sqrt).transpose().dot(degree_mat_inv_sqrt).tocoo()
+    degree_mat_inv_sqrt = sp.diags(
+        np.power(rowsum, -0.5).flatten()
+    )
+
+    # Symmetric adjacency normalization
+    adj_normalized = (
+        adj_
+        .dot(degree_mat_inv_sqrt)
+        .transpose()
+        .dot(degree_mat_inv_sqrt)
+        .tocoo()
+    )
+
     return sparse_to_tuple(adj_normalized)
 
 
-def construct_feed_dict(adj_normalized, features, placeholders):##少一个adj
-    # construct feed dictionary
+def construct_feed_dict(adj_normalized, features, placeholders):
+    """
+    Construct the feed dictionary for TensorFlow training.
+
+    Parameters
+    ----------
+    adj_normalized : tuple
+        Normalized adjacency matrix in tuple format.
+    features : tuple
+        Node feature matrix in tuple format.
+    placeholders : dict
+        TensorFlow placeholders.
+
+    Returns
+    -------
+    dict
+        Feed dictionary used for model training.
+    """
     feed_dict = dict()
-    feed_dict.update({placeholders['features']: features})
-    feed_dict.update({placeholders['adj']: adj_normalized})
-    # feed_dict.update({placeholders['adj_orig']: adj})
+
+    feed_dict.update({
+        placeholders['features']: features
+    })
+
+    feed_dict.update({
+        placeholders['adj']: adj_normalized
+    })
+
     return feed_dict
 
 
 def mask_test_edges(adj):
-    # Function to build test set with 10% positive links
-    # NOTE: Splits are randomized and results might slightly deviate from reported numbers in the paper.
-    # TODO: Clean up.
+    """
+    Generate positive and negative edge samples.
 
-   # Remove diagonal elements 去掉对角元素并且存储时去掉0元素，即在存储里面也去掉0元素
-    adj = adj - sp.dia_matrix((adj.diagonal()[np.newaxis, :], [0]), shape=adj.shape)
+    This function removes self-loops, extracts existing edges as
+    positive samples, and randomly generates an equal number of
+    non-existing circRNA-disease pairs as negative samples.
+    """
+
+    # Remove diagonal elements
+    adj = adj - sp.dia_matrix(
+        (adj.diagonal()[np.newaxis, :], [0]),
+        shape=adj.shape
+    )
+
     adj.eliminate_zeros()
-    # Check that diag is zero:
-    assert np.diag(adj.todense()).sum() == 0 #对角线求和，确保对角元素和为0
-    adj_triu = sp.triu(adj) #取出稀疏矩阵上三角部分的元素
+
+    # Ensure that all diagonal elements are zero
+    assert np.diag(adj.todense()).sum() == 0
+
+    # Extract upper-triangular edges to avoid duplicated undirected edges
+    adj_triu = sp.triu(adj)
+
     adj_tuple = sparse_to_tuple(adj_triu)
-    #print("adj_tuple", adj_tuple[0])
-    edges = adj_tuple[0]#取出所有的边，里面没有重复，一对对关系，每个关系是用一组数表示
-    edges_all = sparse_to_tuple(adj)[0]#所有的边，含对角线元素和上下对角矩阵的重复元素
 
-    # num_test = int(np.floor(edges.shape[0] / 10.))
-    # num_val = int(np.floor(edges.shape[0] / 20.))
+    # Positive edges without duplication
+    edges = adj_tuple[0]
 
-    all_edge_idx = list(range(edges.shape[0])) #给所有的边一个编号，从0到n
-    np.random.shuffle(all_edge_idx)#给所有的边打散
-   # val_edge_idx = all_edge_idx[:num_val]#取二十分之一当作val data
-   #  test_edge_idx = all_edge_idx[num_val:(num_val + num_test)]
-   #  test_edges = edges[test_edge_idx]
-   #  val_edges = edges[val_edge_idx]
-   #  train_edges = np.delete(edges, np.hstack([test_edge_idx, val_edge_idx]), axis=0)
+    # All observed edges
+    edges_all = sparse_to_tuple(adj)[0]
+
+    # Randomly shuffle edge indices
+    all_edge_idx = list(range(edges.shape[0]))
+    np.random.shuffle(all_edge_idx)
 
     def ismember(a, b, tol=5):
-        rows_close = np.all(np.round(a - b[:, None], tol) == 0, axis=-1)#判断矩阵中所有元素是否都为true
-        return np.any(rows_close) #判断矩阵中是否有一个为true
+        """
+        Check whether an edge already exists in the edge set.
+        """
+        rows_close = np.all(
+            np.round(a - b[:, None], tol) == 0,
+            axis=-1
+        )
 
-    edges_false = []#产生负样本的 edges
-    l = len(edges)
-    while len(edges_false) <l:
-        idx_i = np.random.randint(0, 561)#561,708,234,286
-        idx_j = np.random.randint(561, adj.shape[0])##
+        return np.any(rows_close)
+
+    # Generate negative samples
+    edges_false = []
+
+    num_positive_edges = len(edges)
+
+    while len(edges_false) < num_positive_edges:
+
+        # Randomly select one circRNA node and one disease node
+        idx_i = np.random.randint(0, 561)
+        idx_j = np.random.randint(561, adj.shape[0])
+
         if idx_i == idx_j:
             continue
-        if ismember([idx_i, idx_j], edges_all):#如果随机出来的是正样本，跳过
+
+        # Skip existing positive associations
+        if ismember([idx_i, idx_j], edges_all):
             continue
+
         edges_false.append([idx_i, idx_j])
 
-   # data = np.ones(train_edges.shape[0])
-
-    # Re-build adj matrix
-    # adj_train = sp.csr_matrix((data, (train_edges[:, 0], train_edges[:, 1])), shape=adj.shape)#将稀疏矩阵两列边，一列关系的存储方式变成 matrix 存储
-    # adj_train = adj_train + adj_train.T#变成对称矩阵
-
-    # NOTE: these edge lists only contain single direction of edge!
+    # These edge lists contain only one direction of each edge.
     return edges_all, edges, edges_false
-
-
-
+```
